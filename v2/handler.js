@@ -34,15 +34,6 @@ var TChannelUnhandledFrameTypeError = TypedError({
     typeCode: null
 });
 
-var TChannelApplicationError = TypedError({
-    type: 'tchannel.application',
-    message: 'tchannel application error code {code}',
-    code: null,
-    arg1: null,
-    arg2: null,
-    arg3: null
-});
-
 function TChannelV2Handler(channel, options) {
     if (!(this instanceof TChannelV2Handler)) {
         return new TChannelV2Handler(channel, options);
@@ -52,11 +43,6 @@ function TChannelV2Handler(channel, options) {
         objectMode: true
     });
     self.channel = channel;
-    // TODO: may be better suited to pull out an operation collection
-    // abstraction and then encapsulate through that rather than this
-    // run/complete approach
-    self.runInOp = options.runInOp;
-    self.completeOutOp = options.completeOutOp;
     self.remoteHostPort = null; // filled in by identify message
     self.lastSentFrameId = 0;
 }
@@ -96,11 +82,10 @@ TChannelV2Handler.prototype.handleInitRequest = function handleInitRequest(reqFr
     }
     /* jshint camelcase:false */
     var hostPort = reqFrame.body.headers.host_port;
-    var processName = reqFrame.body.headers.process_name;
+    // var processName = reqFrame.body.headers.process_name; // TODO: need this?
     /* jshint camelcase:true */
     self.remoteHostPort = hostPort;
-    // TODO: use processName
-    self.emit('identify.in', hostPort, processName);
+    self.emit('init.request', reqFrame.body.headers);
     self.sendInitResponse(reqFrame);
     callback();
 };
@@ -112,38 +97,42 @@ TChannelV2Handler.prototype.handleInitResponse = function handleInitResponse(res
     }
     /* jshint camelcase:false */
     var hostPort = resFrame.body.headers.host_port;
-    var processName = resFrame.body.headers.process_name;
+    // var processName = resFrame.body.headers.process_name; // TODO: need this?
     /* jshint camelcase:true */
-    // TODO: use processName
     self.remoteHostPort = hostPort;
-    self.emit('identify.out', hostPort, processName);
+    self.emit('init.response', resFrame.body.headers);
     callback();
 };
 
 TChannelV2Handler.prototype.handleCallRequest = function handleCallRequest(reqFrame, callback) {
     var self = this;
-    var id = reqFrame.id;
-    var name = String(reqFrame.body.arg1);
 
     if (self.remoteHostPort === null) {
         return callback(new Error('call request before init request')); // TODO typed error
     }
 
-    var handler = self.channel.getEndpointHandler(name);
-    var responseHeaders = {};
-
-    self.runInOp(handler, {
-        id: id,
+    // TODO: factor out proper object prototypes for these
+    var req = {
+        id: reqFrame.id,
         tracing: reqFrame.tracing,
         service: reqFrame.service,
+        name: String(reqFrame.body.arg1),
         requestHeaders: reqFrame.headers,
         arg1: reqFrame.body.arg1,
         arg2: reqFrame.body.arg2,
-        arg3: reqFrame.body.arg3,
-        responseHeaders: responseHeaders
-    }, function sendResponseFrame(err, res1, res2) {
-        self.sendResponseFrame(reqFrame, responseHeaders, err, res1, res2);
-    });
+        arg3: reqFrame.body.arg3
+    };
+    var res = {
+        flags: 0, // TODO: streaming
+        id: reqFrame.id,
+        arg1: reqFrame.body.arg1,
+        headers: {},
+        checksum: reqFrame.body.csum.type,
+        send: function sendResponse(err, res1, res2) {
+            self.sendResponseFrame(req, res, err, res1, res2);
+        }
+    };
+    self.emit('call.request', req, res);
     callback();
 };
 
@@ -152,21 +141,16 @@ TChannelV2Handler.prototype.handleCallResponse = function handleCallResponse(res
     if (self.remoteHostPort === null) {
         return callback(new Error('call response before init response')); // TODO typed error
     }
-    var id = resFrame.id;
-    var code = resFrame.body.code;
-    var arg1 = resFrame.body.arg1;
-    var arg2 = resFrame.body.arg2;
-    var arg3 = resFrame.body.arg3;
-    if (code === v2.CallResponse.Codes.OK) {
-        self.completeOutOp(null, id, arg2, arg3);
-    } else {
-        self.completeOutOp(TChannelApplicationError({
-            code: code,
-            arg1: arg1,
-            arg2: arg2,
-            arg3: arg3
-        }), id, arg2, null);
-    }
+
+    var responseContext = {
+        // TODO: factor out an object prototype for this
+        id: resFrame.id,
+        code: resFrame.body.code,
+        arg1: resFrame.body.arg1,
+        arg2: resFrame.body.arg2,
+        arg3: resFrame.body.arg3
+    };
+    self.emit('call.response', responseContext);
     callback();
 };
 
@@ -183,7 +167,7 @@ TChannelV2Handler.prototype.handleError = function handleError(errFrame, callbac
         // fatal error not associated with a prior frame
         callback(err);
     } else {
-        self.completeOutOp(err, id, null, null);
+        self.emit('call.error', err);
         callback();
     }
 };
@@ -239,22 +223,21 @@ TChannelV2Handler.prototype.sendRequestFrame = function sendRequestFrame(options
     return id;
 };
 
-TChannelV2Handler.prototype.sendResponseFrame = function sendResponseFrame(reqFrame, headers, err, res1, res2) {
+TChannelV2Handler.prototype.sendResponseFrame = function sendResponseFrame(req, res, err, res1, res2) {
     // TODO: refactor this all the way back out through the op handler calling convention
     var self = this;
-    var id = reqFrame.id;
-    var flags = 0; // TODO: streaming
-    var arg1 = reqFrame.body.arg1;
-    var tracing = reqFrame.body.tracing;
-    var checksumType = reqFrame.body.csum.type;
     var resBody;
     if (err) {
         var errArg = isError(err) ? err.message : JSON.stringify(err); // TODO: better
-        resBody = v2.CallResponse(flags, v2.CallResponse.Codes.Error, tracing, headers, checksumType, arg1, res1, errArg);
+        resBody = v2.CallResponse(
+            res.flags, v2.CallResponse.Codes.Error, req.tracing,
+            res.headers, res.checksum, res.arg1, res1, errArg);
     } else {
-        resBody = v2.CallResponse(flags, v2.CallResponse.Codes.OK, tracing, headers, checksumType, arg1, res1, res2);
+        resBody = v2.CallResponse(
+            res.flags, v2.CallResponse.Codes.OK, req.tracing,
+            res.headers, res.checksum, res.arg1, res1, res2);
     }
-    var resFrame = v2.Frame(id, resBody);
+    var resFrame = v2.Frame(res.id, resBody);
     self.push(resFrame);
 };
 /* jshint maxparams:4 */

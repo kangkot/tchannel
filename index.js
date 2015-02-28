@@ -392,16 +392,18 @@ function TChannelConnection(channel, socket, direction, remoteAddr) {
 
     self.reader = new v2.Reader(v2.Frame);
     self.writer = new v2.Writer();
-    self.handler = new v2.Handler(self.channel, {
-        // TODO: the op boundary is probably better handled by an operation
-        // collection abstraction that the handler can submit to and then later
-        // fulfill to
-        runInOp: function runInOp(handler, options, sendResponseFrame) {
-            self.runInOp(handler, options, sendResponseFrame);
-        },
-        completeOutOp: function completeOutOp(err, id, res1, res2) {
-            self.completeOutOp(id, err, res1, res2);
-        }
+    self.handler = new v2.Handler(self.channel);
+
+    // TODO: refactor op boundary to pass full req/res around
+    self.handler.on('call.request', function onCallRequest(req) {
+        var handler = self.channel.getEndpointHandler(req.name);
+        self.runInOp(handler, req, req.sendResponseFrame);
+    });
+    self.handler.on('call.response', function onCallResponse(res) {
+        self.completeOutOp(res.id, null, res.arg2, res.arg3);
+    });
+    self.handler.on('call.error', function onCallError(err) {
+        self.completeOutOp(err.originalId, err, null, null);
     });
 
     self.socket.setNoDelay(true);
