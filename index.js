@@ -451,6 +451,7 @@ function TChannelConnection(channel, socket, direction, remoteAddr) {
 
     self.socket
         .pipe(self.reader)
+        .pipe(self.handler)
         ;
 
     function clearTimer() {
@@ -629,10 +630,9 @@ TChannelConnection.prototype.onSocketErr = function onSocketErr(err) {
     }
 };
 
-TChannelConnection.prototype.onFrame = function onFrame(frame) {
+TChannelConnection.prototype.onFrame = function onFrame(/* frame */) {
     var self = this;
     self.lastTimeoutTime = 0;
-    self.handler.handleFrame(frame);
 };
 
 TChannelConnection.prototype.completeOutOp = function completeOutOp(id, err, arg1, arg2) {
