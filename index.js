@@ -391,6 +391,7 @@ function TChannelConnection(channel, socket, direction, remoteAddr) {
     self.closing = false;
 
     self.reader = new v2.Reader(v2.Frame);
+    self.writer = new v2.Writer();
     self.handler = new v2.Handler(self.channel, {
         // TODO: the op boundary is probably better handled by an operation
         // collection abstraction that the handler can submit to and then later
@@ -447,11 +448,9 @@ function TChannelConnection(channel, socket, direction, remoteAddr) {
     self.socket
         .pipe(self.reader)
         .pipe(self.handler)
+        .pipe(self.writer)
+        .pipe(self.socket)
         ;
-
-    self.handler.on('data', function onHandlerWriteFrame(frame, encoding, callback) {
-        self._writeFrame(frame, callback);
-    });
 
     function clearTimer() {
         self.channel.clearTimeout(self.timer);
@@ -686,22 +685,6 @@ TChannelConnection.prototype.runInOp = function runInOp(handler, options, sendRe
         sendResponseFrame(err, res1, res2);
         delete self.inOps[id];
         self.inPending--;
-    }
-};
-
-TChannelConnection.prototype._writeFrame = function _writeFrame(frame, callback) {
-    var self = this;
-    if (self.closing) {
-        self.logger.warn('write frame after close', {
-            hostPort: self.channel.hostPort,
-            remoteAddr: self.remoteAddr
-        });
-        if (callback) {
-            callback(new Error('socket closing'));
-        }
-    } else {
-        var buffer = frame.toBuffer();
-        self.socket.write(buffer, null, callback);
     }
 };
 

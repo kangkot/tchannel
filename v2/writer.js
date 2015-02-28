@@ -20,38 +20,27 @@
 
 'use strict';
 
-module.exports.VERSION = 2;
+var inherits = require('util').inherits;
+var Writable = require('stream').Writable;
 
-var Types = {};
-module.exports.Types = Types;
+module.exports = ChunkWriter;
 
-var Frame = require('./frame');
+function ChunkWriter(options) {
+    if (!(this instanceof ChunkWriter)) {
+        return new ChunkWriter(options);
+    }
+    var self = this;
+    Writable.call(self, options);
+    self._writableState.objectMode = true;
+    self._readableState.objectMode = false;
+}
 
-var init = require('./init');
-Types.InitRequest = init.Request.TypeCode;
-Types.InitResponse = init.Response.TypeCode;
-Frame.Types[Types.InitRequest] = init.Request;
-Frame.Types[Types.InitResponse] = init.Response;
-module.exports.InitRequest = init.Request;
-module.exports.InitResponse = init.Response;
+inherits(ChunkWriter, Writable);
 
-var call = require('./call');
-Types.CallRequest = call.Request.TypeCode;
-Types.CallResponse = call.Response.TypeCode;
-Frame.Types[Types.CallRequest] = call.Request;
-Frame.Types[Types.CallResponse] = call.Response;
-module.exports.CallRequest = call.Request;
-module.exports.CallResponse = call.Response;
+ChunkWriter.prototype._write = function _write(frame, encoding, callback) {
+    var self = this;
+    var chunk = frame.toBuffer();
+    self.push(chunk);
+    callback();
+};
 
-var ErrorResponse = require('./error_response');
-Types.ErrorResponse = ErrorResponse.TypeCode;
-Frame.Types[Types.ErrorResponse] = ErrorResponse;
-module.exports.ErrorResponse = ErrorResponse;
-
-module.exports.Checksum = require('./checksum');
-
-module.exports.Frame = Frame;
-
-module.exports.Reader = require('./reader');
-module.exports.Handler = require('./handler');
-module.exports.Writer = require('./writer');
