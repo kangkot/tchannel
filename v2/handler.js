@@ -176,6 +176,7 @@ TChannelV2Handler.prototype.handleError = function handleError(errFrame, callbac
     var code = errFrame.body.code;
     var message = errFrame.body.message;
     var err = v2.ErrorResponse.CodeErrors[code]({
+        originalId: id,
         message: message
     });
     if (id === v2.Frame.NullId) {
