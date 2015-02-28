@@ -175,9 +175,16 @@ TChannelV2Handler.prototype.handleError = function handleError(errFrame, callbac
     var id = errFrame.id;
     var code = errFrame.body.code;
     var message = errFrame.body.message;
-    var err = v2.ErrorResponse.CodeErrors[code]({message: message});
-    self.completeOutOp(err, id, null, null);
-    callback();
+    var err = v2.ErrorResponse.CodeErrors[code]({
+        message: message
+    });
+    if (id === v2.Frame.NullId) {
+        // fatal error not associated with a prior frame
+        callback(err);
+    } else {
+        self.completeOutOp(err, id, null, null);
+        callback();
+    }
 };
 
 TChannelV2Handler.prototype.sendInitRequest = function sendInitRequest() {
