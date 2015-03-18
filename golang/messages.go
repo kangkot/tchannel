@@ -36,16 +36,20 @@ const (
 	messageTypeCallRes         messageType = 0x04
 	messageTypeCallReqContinue messageType = 0x13
 	messageTypeCallResContinue messageType = 0x14
+	messageTypePing            messageType = 0xd0
+	messageTypePong            messageType = 0xd1
 	messageTypeError           messageType = 0xFF
 )
 
 var messageTypeNames = map[messageType]string{
-	messageTypeInitReq:         "initReq",
+	messageTypeInitReq:         "InitReq",
 	messageTypeInitRes:         "InitRes",
 	messageTypeCallReq:         "CallReq",
 	messageTypeCallReqContinue: "CallReqContinue",
 	messageTypeCallRes:         "CallRes",
 	messageTypeCallResContinue: "CallResContinue",
+	messageTypePing:            "Ping",
+	messageTypePong:            "Pong",
 	messageTypeError:           "Error",
 }
 
@@ -485,3 +489,21 @@ func (m errorMessage) AsSystemError() error {
 	// TODO(mmihic): Might be nice to return one of the well defined error types
 	return NewSystemError(m.errorCode, m.message)
 }
+
+type pingMessage struct {
+	id uint32
+}
+
+func (m *pingMessage) ID() uint32                      { return m.id }
+func (m *pingMessage) Type() messageType               { return messageTypePing }
+func (m *pingMessage) read(r typed.ReadBuffer) error   { return nil }
+func (m *pingMessage) write(w typed.WriteBuffer) error { return nil }
+
+type pongMessage struct {
+	id uint32
+}
+
+func (m *pongMessage) ID() uint32                      { return m.id }
+func (m *pongMessage) Type() messageType               { return messageTypePing }
+func (m *pongMessage) read(r typed.ReadBuffer) error   { return nil }
+func (m *pongMessage) write(w typed.WriteBuffer) error { return nil }
