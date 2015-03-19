@@ -301,59 +301,69 @@ TChannelV2Handler.prototype.sendInitResponse = function sendInitResponse(reqFram
 
 TChannelV2Handler.prototype.sendCallRequestFrame = function sendCallRequestFrame(req, flags, args) {
     var self = this;
-    var id = req.id;
     var reqBody = v2.CallRequest(
         flags, req.ttl, req.tracing,
         req.service, req.headers,
-        req.checksumType,
-        args);
-    var reqFrame = v2.Frame(id, reqBody);
-    reqBody.updateChecksum();
-    req.checksum = reqBody.csum;
-    self.push(reqFrame);
-    return id;
+        req.checksumType);
+    var csum = req.checksum = reqBody.csum;
+    var bodies = reqBody.splitArgs(args);
+    for (var i = 0; i < bodies.length; i++) {
+        var body = bodies[i];
+        if (i === 0) {
+            body.updateChecksum();
+        } else {
+            body.updateChecksum(csum.val);
+        }
+        csum = req.checksum = body.csum;
+        self.push(v2.Frame(req.id, body));
+    }
 };
 
 TChannelV2Handler.prototype.sendCallResponseFrame = function sendCallResponseFrame(res, flags, args) {
-    // TODO: refactor this all the way back out through the op handler calling convention
     var self = this;
-    var resBody;
-    if (res.ok) {
-        resBody = v2.CallResponse(
-            flags, v2.CallResponse.Codes.OK, res.tracing,
-            res.headers, res.checksumType, args);
-    } else {
-        resBody = v2.CallResponse(
-            flags, v2.CallResponse.Codes.Error, res.tracing,
-            res.headers, res.checksumType, args);
+    var code = res.ok ? v2.CallResponse.Codes.OK : v2.CallResponse.Codes.Error;
+    var resBody = v2.CallResponse(
+        flags, code, res.tracing,
+        res.headers, res.checksumType);
+    var csum = res.checksum = resBody.csum;
+    var bodies = resBody.splitArgs(args);
+    for (var i = 0; i < bodies.length; i++) {
+        var body = bodies[i];
+        if (i === 0) {
+            body.updateChecksum();
+        } else {
+            body.updateChecksum(csum.val);
+        }
+        csum = res.checksum = body.csum;
+        self.push(v2.Frame(res.id, body));
     }
-    var resFrame = v2.Frame(res.id, resBody);
-    resBody.updateChecksum();
-    res.checksum = resBody.csum;
-    self.push(resFrame);
 };
 
 TChannelV2Handler.prototype.sendCallRequestContFrame = function sendCallRequestContFrame(req, flags, args) {
     var self = this;
-    var id = req.id;
     var csum = req.checksum;
-    var reqBody = v2.CallRequestCont(flags, csum.type, args);
-    var reqFrame = v2.Frame(id, reqBody);
-    reqBody.updateChecksum(csum.val);
-    req.checksum = reqBody.csum;
-    self.push(reqFrame);
-    return id;
+    var reqBody = v2.CallRequestCont(flags, csum.type);
+    var bodies = reqBody.splitArgs(args);
+    for (var i = 0; i < bodies.length; i++) {
+        var body = bodies[i];
+        body.updateChecksum(csum.val);
+        csum = req.checksum = body.csum;
+        self.push(v2.Frame(req.id, body));
+    }
 };
 
 TChannelV2Handler.prototype.sendCallResponseContFrame = function sendCallResponseContFrame(res, flags, args) {
     // TODO: refactor this all the way back out through the op handler calling convention
     var self = this;
     var csum = res.checksum;
-    var resBody = v2.CallResponseCont(flags, csum.type, args);
-    var resFrame = v2.Frame(res.id, resBody);
-    resBody.updateChecksum(csum.val);
-    res.checksum = resBody.csum;
-    self.push(resFrame);
+    var resBody = v2.CallResponseCont(flags, csum.type);
+    var bodies = resBody.splitArgs(args);
+    for (var i = 0; i < bodies.length; i++) {
+        var body = bodies[i];
+        body.updateChecksum(csum.val);
+        csum = res.checksum = body.csum;
+        self.push(v2.Frame(res.id, body));
+    }
 };
 
 TChannelV2Handler.prototype.sendErrorFrame = function sendErrorFrame(req, codeString, message) {

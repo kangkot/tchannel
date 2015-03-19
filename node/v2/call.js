@@ -24,6 +24,11 @@ var bufrw = require('bufrw');
 var Checksum = require('./checksum');
 var header = require('./header');
 var ArgsRW = require('./args');
+var Frame = require('./frame');
+
+var Flags = {
+    Fragment: 0x01
+};
 
 module.exports.Request = CallRequest;
 module.exports.Response = CallResponse;
@@ -56,11 +61,11 @@ function CallRequest(flags, ttl, tracing, service, headers, csum, args) {
     self.args = args || [];
 }
 
+CallRequest.Cont = require('./cont').CallRequestCont;
+
 CallRequest.TypeCode = 0x03;
 
-CallRequest.Flags = {
-    Fragment: 0x01
-};
+CallRequest.Flags = Flags;
 
 CallRequest.RW = bufrw.Struct(CallRequest, [
     {name: 'flags', rw: bufrw.UInt8},            // flags:1
@@ -71,6 +76,41 @@ CallRequest.RW = bufrw.Struct(CallRequest, [
     {name: 'csum', rw: Checksum.RW},             // csumtype:1 (csum:4){0,1}
     {name: 'args', rw: ArgsRW(bufrw.buf2)},      // (arg~2)+
 ]);
+
+CallRequest.prototype.splitArgs = function splitArgs(args) {
+    var self = this;
+    // assert not self.args
+    var lenRes = self.constructor.RW.byteLength(self);
+    if (lenRes.err) throw lenRes.err;
+    var maxBodySize = Frame.MaxBodySize - lenRes.length;
+    var remain = maxBodySize;
+    var first = [];
+    var argSize = 2;
+    for (var i = 0; i < args.length; i++) {
+        var argLength = argSize + args[i].length;
+        if (argLength < remain) {
+            first.push(args[i]);
+            remain -= argLength;
+        } else {
+            first.push(args[i].slice(0, remain - argSize));
+            args = [args[i].slice(remain - argSize)].concat(args.slice(i));
+            break;
+        }
+    }
+    self.args = first;
+    if (args.length) {
+        var isLast = !(self.flags & CallRequest.Flags.Fragment);
+        var cont = self.constructor.Cont(self.flags | CallRequest.Flags.Fragment, self.csum.type);
+        var ret = cont.splitArgs(args);
+        ret.unshift(self);
+        if (isLast) {
+            ret[ret.length - 1].flags &= ~ CallRequest.Flags.Fragment;
+        }
+        return ret;
+    } else {
+        return [self];
+    }
+};
 
 CallRequest.prototype.updateChecksum = function updateChecksum() {
     var self = this;
@@ -101,6 +141,8 @@ function CallResponse(flags, code, tracing, headers, csum, args) {
     self.args = args || [];
 }
 
+CallResponse.Cont = require('./cont').CallResponseCont;
+
 CallResponse.TypeCode = 0x04;
 
 CallResponse.Flags = CallRequest.Flags;
@@ -118,6 +160,8 @@ CallResponse.RW = bufrw.Struct(CallResponse, [
     {name: 'csum', rw: Checksum.RW},             // csumtype:1 (csum:4){0},1}
     {name: 'args', rw: ArgsRW(bufrw.buf2)},      // (arg~2)+
 ]);
+
+CallResponse.prototype.splitArgs = CallRequest.prototype.splitArgs;
 
 CallResponse.prototype.updateChecksum = function updateChecksum() {
     var self = this;
