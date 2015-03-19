@@ -21,28 +21,25 @@
 'use strict';
 
 var bufrw = require('bufrw');
-var WriteResult = bufrw.WriteResult;
-var ReadResult = bufrw.ReadResult;
 var Checksum = require('./checksum');
 var header = require('./header');
+var ArgsRW = require('./args');
 
 module.exports.Request = CallRequest;
 module.exports.Response = CallResponse;
 
-var emptyBuffer = new Buffer(0);
 var emptyTracing = new Buffer(25);
 emptyTracing.fill(0);
 
-// TODO: need to support fragmentation and continuation
 // TODO: validate transport header names?
 // TODO: Checksum-like class for tracing
 
 /* jshint maxparams:10 */
 
-// flags:1 ttl:4 tracing:24 traceflags:1 service~1 nh:1 (hk~1 hv~1){nh} csumtype:1 (csum:4){0,1} arg1~2 arg2~2 arg3~2
-function CallRequest(flags, ttl, tracing, service, headers, csum, arg1, arg2, arg3) {
+// flags:1 ttl:4 tracing:24 traceflags:1 service~1 nh:1 (hk~1 hv~1){nh} csumtype:1 (csum:4){0,1} (arg~2)+
+function CallRequest(flags, ttl, tracing, service, headers, csum, args) {
     if (!(this instanceof CallRequest)) {
-        return new CallRequest(flags, ttl, tracing, service, headers, csum, arg1, arg2, arg3);
+        return new CallRequest(flags, ttl, tracing, service, headers, csum, args);
     }
     var self = this;
     self.type = CallRequest.TypeCode;
@@ -56,9 +53,7 @@ function CallRequest(flags, ttl, tracing, service, headers, csum, arg1, arg2, ar
     } else {
         self.csum = Checksum.objOrType(csum);
     }
-    self.arg1 = arg1 || emptyBuffer;
-    self.arg2 = arg2 || emptyBuffer;
-    self.arg3 = arg3 || emptyBuffer;
+    self.args = args || [];
 }
 
 CallRequest.TypeCode = 0x03;
@@ -68,23 +63,29 @@ CallRequest.Flags = {
 };
 
 CallRequest.RW = bufrw.Struct(CallRequest, [
-    {call: {writeInto: prepareWrite}},
     {name: 'flags', rw: bufrw.UInt8},            // flags:1
     {name: 'ttl', rw: bufrw.UInt32BE},           // ttl:4
     {name: 'tracing', rw: bufrw.FixedWidth(25)}, // tracing:24 traceflags:1
     {name: 'service', rw: bufrw.str1},           // service~1
     {name: 'headers', rw: header.header1},       // nh:1 (hk~1 hv~1){nh}
     {name: 'csum', rw: Checksum.RW},             // csumtype:1 (csum:4){0,1}
-    {name: 'arg1', rw: bufrw.buf2},              // arg1~2
-    {name: 'arg2', rw: bufrw.buf2},              // arg2~2
-    {name: 'arg3', rw: bufrw.buf2},              // arg3~2
-    {call: {readFrom: readGuard}}
+    {name: 'args', rw: ArgsRW(bufrw.buf2)},      // (arg~2)+
 ]);
 
-// flags:1 code:1 tracing:24 traceflags:1 nh:1 (hk~1 hv~1){nh} csumtype:1 (csum:4){0,1} arg1~2 arg2~2 arg3~2
-function CallResponse(flags, code, tracing, headers, csum, arg1, arg2, arg3) {
+CallRequest.prototype.updateChecksum = function updateChecksum() {
+    var self = this;
+    return self.csum.update(self.args);
+};
+
+CallRequest.prototype.verifyChecksum = function verifyChecksum() {
+    var self = this;
+    return self.csum.verify(self.args);
+};
+
+// flags:1 code:1 tracing:24 traceflags:1 nh:1 (hk~1 hv~1){nh} csumtype:1 (csum:4){0,1} (arg~2)+
+function CallResponse(flags, code, tracing, headers, csum, args) {
     if (!(this instanceof CallResponse)) {
-        return new CallResponse(flags, code, tracing, headers, csum, arg1, arg2, arg3);
+        return new CallResponse(flags, code, tracing, headers, csum, args);
     }
     var self = this;
     self.type = CallResponse.TypeCode;
@@ -97,9 +98,7 @@ function CallResponse(flags, code, tracing, headers, csum, arg1, arg2, arg3) {
     } else {
         self.csum = Checksum.objOrType(csum);
     }
-    self.arg1 = arg1 || emptyBuffer;
-    self.arg2 = arg2 || emptyBuffer;
-    self.arg3 = arg3 || emptyBuffer;
+    self.args = args || [];
 }
 
 CallResponse.TypeCode = 0x04;
@@ -112,37 +111,20 @@ CallResponse.Codes = {
 };
 
 CallResponse.RW = bufrw.Struct(CallResponse, [
-    {call: {writeInto: prepareWrite}},
     {name: 'flags', rw: bufrw.UInt8},            // flags:1
     {name: 'code', rw: bufrw.UInt8},             // code:1
     {name: 'tracing', rw: bufrw.FixedWidth(25)}, // tracing:24 traceflags:1
     {name: 'headers', rw: header.header1},       // nh:1 (hk~1 hv~1){nh}
     {name: 'csum', rw: Checksum.RW},             // csumtype:1 (csum:4){0},1}
-    {name: 'arg1', rw: bufrw.buf2},              // arg1~2
-    {name: 'arg2', rw: bufrw.buf2},              // arg2~2
-    {name: 'arg3', rw: bufrw.buf2},              // arg3~2
-    {call: {readFrom: readGuard}}
+    {name: 'args', rw: ArgsRW(bufrw.buf2)},      // (arg~2)+
 ]);
 
-function prepareWrite(body, buffer, offset) {
-    if (body.flags & CallRequest.Flags.Fragment) {
-        return WriteResult.error(
-            new Error('streaming call not implemented'),
-            offset);
-    }
-    body.csum.update([body.arg1, body.arg2, body.arg3]);
-    return WriteResult.just(offset);
-}
+CallResponse.prototype.updateChecksum = function updateChecksum() {
+    var self = this;
+    return self.csum.update(self.args);
+};
 
-function readGuard(body, buffer, offset) {
-    if (body.flags & CallRequest.Flags.Fragment) {
-        return ReadResult.error(
-            new Error('streaming call not implemented'),
-            offset);
-    }
-    var err = body.csum.verify([body.arg1, body.arg2, body.arg3]);
-    if (err) {
-        return ReadResult.error(err, offset);
-    }
-    return ReadResult.just(offset);
-}
+CallResponse.prototype.verifyChecksum = function verifyChecksum() {
+    var self = this;
+    return self.csum.verify(self.args);
+};
