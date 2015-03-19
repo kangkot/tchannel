@@ -3,6 +3,7 @@ from __future__ import absolute_import
 import pytest
 
 import tchannel.messages as tmessage
+from tchannel.outgoing import OutgoingTChannel
 from tchannel.tornado import TChannel
 from tchannel.tcurl import multi_tcurl
 
@@ -20,6 +21,23 @@ def test_tcp_ping_pong(server_manager):
         for i in range(1000):
             conn.ping()
             assert resp == conn.await().message
+
+
+def test_outgoing_tchannel(server_manager, call_response):
+    endpoint = b'tchanneltest'
+    call_response.arg_1 = endpoint
+
+    port = server_manager.port
+    host_port = 'localhost:' + str(port)
+
+    with OutgoingTChannel('test_outgoing_tchannel') as chan:
+        chan.request(host_port).handshake()
+        server_manager.expect_call_request(endpoint).and_return(call_response)
+
+        response = chan.request(host_port).send(endpoint, None, None)
+
+        assert response.arg_1 == call_response.arg_1
+        assert response.arg_3 == call_response.arg_3
 
 
 @pytest.mark.gen_test
