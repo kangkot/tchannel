@@ -24,6 +24,7 @@ require('./argstream.js');
 require('./safe-quit.js');
 require('./timeouts.js');
 require('./send.js');
+require('./streaming.js');
 require('./register.js');
 require('./identify.js');
 require('./tchannel.js');

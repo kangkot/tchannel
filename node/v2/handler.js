@@ -24,10 +24,11 @@ var TypedError = require('error/typed');
 var Duplex = require('stream').Duplex;
 var util = require('util');
 
-var TChannelOutgoingRequest = require('../reqres').OutgoingRequest;
-var TChannelOutgoingResponse = require('../reqres').OutgoingResponse;
-var TChannelIncomingRequest = require('../reqres').IncomingRequest;
-var TChannelIncomingResponse = require('../reqres').IncomingResponse;
+var reqres = require('../reqres');
+var TChannelOutgoingRequest = reqres.OutgoingRequest;
+var TChannelOutgoingResponse = reqres.OutgoingResponse;
+var TChannelIncomingRequest = reqres.IncomingRequest;
+var TChannelIncomingResponse = reqres.IncomingResponse;
 var v2 = require('./index');
 
 module.exports = TChannelV2Handler;
@@ -55,6 +56,9 @@ function TChannelV2Handler(channel, options) {
     self.channel = channel;
     self.remoteHostPort = null; // filled in by identify message
     self.lastSentFrameId = 0;
+    // TODO: GC these... maybe that's up to TChannel itself wrt ops
+    self.streamingReq = Object.create(null);
+    self.streamingRes = Object.create(null);
 }
 
 util.inherits(TChannelV2Handler, Duplex);
@@ -76,6 +80,10 @@ TChannelV2Handler.prototype._write = function _write(frame, encoding, callback) 
             return self.handleCallRequest(frame, callback);
         case v2.Types.CallResponse:
             return self.handleCallResponse(frame, callback);
+        case v2.Types.CallRequestCont:
+            return self.handleCallRequestCont(frame, callback);
+        case v2.Types.CallResponseCont:
+            return self.handleCallResponseCont(frame, callback);
         case v2.Types.ErrorResponse:
             return self.handleError(frame, callback);
         default:
@@ -129,7 +137,16 @@ TChannelV2Handler.prototype.handleCallRequest = function handleCallRequest(reqFr
     if (self.remoteHostPort === null) {
         return callback(new Error('call request before init request')); // TODO typed error
     }
+    var err = reqFrame.body.verifyChecksum();
+    if (err) {
+        callback(err); // TODO wrap context
+        return;
+    }
     var req = self.buildIncomingRequest(reqFrame);
+    req.checksum = reqFrame.body.csum;
+    if (req.state === reqres.States.Streaming) {
+        self.streamingReq[req.id] = req;
+    }
     self.emit('call.incoming.request', req);
     callback();
 };
@@ -139,9 +156,90 @@ TChannelV2Handler.prototype.handleCallResponse = function handleCallResponse(res
     if (self.remoteHostPort === null) {
         return callback(new Error('call response before init response')); // TODO typed error
     }
+    var err = resFrame.body.verifyChecksum();
+    if (err) {
+        callback(err); // TODO wrap context
+        return;
+    }
     var res = self.buildIncomingResponse(resFrame);
+    res.checksum = resFrame.body.csum;
+    if (res.state === reqres.States.Streaming) {
+        self.streamingRes[res.id] = res;
+    }
     self.emit('call.incoming.response', res);
     callback();
+};
+
+TChannelV2Handler.prototype.handleCallRequestCont = function handleCallRequestCont(reqFrame, callback) {
+    var self = this;
+    if (self.remoteHostPort === null) {
+        return callback(new Error('call request cont before init request')); // TODO typed error
+    }
+    var id = reqFrame.id;
+    var req = self.streamingReq[id];
+    if (!req) {
+        return callback(new Error('call request cont for unknown request')); // TODO typed error
+    }
+
+    var csum = req.checksum;
+    if (csum.type !== reqFrame.body.csum.type) {
+        callback(new Error('checksum type changed mid-tream')); // TODO typed error
+        return;
+    }
+    var err = reqFrame.body.verifyChecksum(csum.val);
+    if (err) {
+        callback(err); // TODO wrap context
+        return;
+    }
+    req.checksum = reqFrame.body.csum;
+
+    switch (req.state) {
+        case reqres.States.Initial:
+            callback(new Error('got cont to initial req')); // TODO typed error
+            break;
+        case reqres.States.Streaming:
+            self.continueStream(req, reqFrame, callback);
+            break;
+        case reqres.States.Done:
+            callback(new Error('got cont to done req')); // TODO typed error
+            break;
+    }
+};
+
+TChannelV2Handler.prototype.handleCallResponseCont = function handleCallResponseCont(resFrame, callback) {
+    var self = this;
+    if (self.remoteHostPort === null) {
+        return callback(new Error('call response cont before init response')); // TODO typed error
+    }
+    var id = resFrame.id;
+    var res = self.streamingRes[id];
+    if (!res) {
+        return callback(new Error('call response cont for unknown response')); // TODO typed error
+    }
+
+    var csum = res.checksum;
+    if (csum.type !== resFrame.body.csum.type) {
+        callback(new Error('checksum type changed mid-tream')); // TODO typed error
+        return;
+    }
+    var err = resFrame.body.verifyChecksum(csum.val);
+    if (err) {
+        callback(err); // TODO wrap context
+        return;
+    }
+    res.checksum = resFrame.body.csum;
+
+    switch (res.state) {
+        case reqres.States.Initial:
+            callback(new Error('got cont to initial res')); // TODO typed error
+            break;
+        case reqres.States.Streaming:
+            self.continueStream(res, resFrame, callback);
+            break;
+        case reqres.States.Done:
+            callback(new Error('got cont to done req')); // TODO typed error
+            break;
+    }
 };
 
 TChannelV2Handler.prototype.handleError = function handleError(errFrame, callback) {
@@ -161,6 +259,14 @@ TChannelV2Handler.prototype.handleError = function handleError(errFrame, callbac
         self.emit('call.incoming.error', err);
         callback();
     }
+};
+
+TChannelV2Handler.prototype.continueStream = function continueStream(r, frame, callback) {
+    r.handleFrame(frame.body.args);
+    if (!(frame.body.flags & v2.CallRequest.Flags.Fragment)) {
+        r.handleFrame(null);
+    }
+    callback();
 };
 
 TChannelV2Handler.prototype.sendInitRequest = function sendInitRequest() {
@@ -193,38 +299,62 @@ TChannelV2Handler.prototype.sendInitResponse = function sendInitResponse(reqFram
     self.push(resFrame);
 };
 
-/* jshint maxparams:6 */
-TChannelV2Handler.prototype.sendCallRequestFrame = function sendCallRequestFrame(req, arg1, arg2, arg3) {
+TChannelV2Handler.prototype.sendCallRequestFrame = function sendCallRequestFrame(req, flags, args) {
     var self = this;
     var id = req.id;
     var reqBody = v2.CallRequest(
-        0, req.ttl, req.tracing,
+        flags, req.ttl, req.tracing,
         req.service, req.headers,
         req.checksumType,
-        arg1, arg2, arg3);
+        args);
     var reqFrame = v2.Frame(id, reqBody);
+    reqBody.updateChecksum();
+    req.checksum = reqBody.csum;
     self.push(reqFrame);
     return id;
 };
 
-TChannelV2Handler.prototype.sendCallResponseFrame = function sendCallResponseFrame(res, arg1, arg2, arg3) {
+TChannelV2Handler.prototype.sendCallResponseFrame = function sendCallResponseFrame(res, flags, args) {
     // TODO: refactor this all the way back out through the op handler calling convention
     var self = this;
     var resBody;
-    var flags = 0; // TODO: streaming
     if (res.ok) {
         resBody = v2.CallResponse(
             flags, v2.CallResponse.Codes.OK, res.tracing,
-            res.headers, res.checksumType, arg1, arg2, arg3);
+            res.headers, res.checksumType, args);
     } else {
         resBody = v2.CallResponse(
             flags, v2.CallResponse.Codes.Error, res.tracing,
-            res.headers, res.checksumType, arg1, arg2, arg3);
+            res.headers, res.checksumType, args);
     }
     var resFrame = v2.Frame(res.id, resBody);
+    resBody.updateChecksum();
+    res.checksum = resBody.csum;
     self.push(resFrame);
 };
-/* jshint maxparams:4 */
+
+TChannelV2Handler.prototype.sendCallRequestContFrame = function sendCallRequestContFrame(req, flags, args) {
+    var self = this;
+    var id = req.id;
+    var csum = req.checksum;
+    var reqBody = v2.CallRequestCont(flags, csum.type, args);
+    var reqFrame = v2.Frame(id, reqBody);
+    reqBody.updateChecksum(csum.val);
+    req.checksum = reqBody.csum;
+    self.push(reqFrame);
+    return id;
+};
+
+TChannelV2Handler.prototype.sendCallResponseContFrame = function sendCallResponseContFrame(res, flags, args) {
+    // TODO: refactor this all the way back out through the op handler calling convention
+    var self = this;
+    var csum = res.checksum;
+    var resBody = v2.CallResponseCont(flags, csum.type, args);
+    var resFrame = v2.Frame(res.id, resBody);
+    resBody.updateChecksum(csum.val);
+    res.checksum = resBody.csum;
+    self.push(resFrame);
+};
 
 TChannelV2Handler.prototype.sendErrorFrame = function sendErrorFrame(req, codeString, message) {
     var self = this;
@@ -247,29 +377,54 @@ TChannelV2Handler.prototype.buildOutgoingRequest = function buildOutgoingRequest
     if (options.checksumType === undefined || options.checksumType === null) {
         options.checksumType = v2.Checksum.Types.FarmHash32;
     }
-    var req = TChannelOutgoingRequest(id, options, sendCallRequestFrame);
+    options.sendFrame = {
+        callRequest: sendCallRequestFrame,
+        callRequestCont: sendCallRequestContFrame
+    };
+    var req = TChannelOutgoingRequest(id, options);
     return req;
-    function sendCallRequestFrame(arg1, arg2, arg3) {
-        self.sendCallRequestFrame(req, arg1, arg2, arg3);
+
+    function sendCallRequestFrame(isLast, args) {
+        var flags = 0;
+        if (!isLast) flags |= v2.CallResponse.Flags.Fragment;
+        self.sendCallRequestFrame(req, flags, args);
+    }
+
+    function sendCallRequestContFrame(isLast, args) {
+        var flags = 0;
+        if (!isLast) flags |= v2.CallResponse.Flags.Fragment;
+        self.sendCallRequestContFrame(req, flags, args);
     }
 };
 
 TChannelV2Handler.prototype.buildOutgoingResponse = function buildOutgoingResponse(req) {
     var self = this;
-    var senders = {
-        callResponseFrame: sendCallResponseFrame,
-        errorFrame: sendErrorFrame
-    };
     var res = TChannelOutgoingResponse(req.id, {
         tracing: req.tracing,
         headers: {},
         checksumType: req.checksumType,
-        arg1: req.arg1
-    }, senders);
+        sendFrame: {
+            callResponse: sendCallResponseFrame,
+            callResponseCont: sendCallResponseContFrame,
+            error: sendErrorFrame
+        }
+    });
+    // TODO: if we really need this, then we need to buffer / keep the arg1
+    // value on TChannelIncomingRequest
+    //     res.arg1.end(req.arg1Value);
+    res.arg1.end();
     return res;
 
-    function sendCallResponseFrame(arg1, arg2, arg3) {
-        self.sendCallResponseFrame(res, arg1, arg2, arg3);
+    function sendCallResponseFrame(isLast, args) {
+        var flags = 0;
+        if (!isLast) flags |= v2.CallResponse.Flags.Fragment;
+        self.sendCallResponseFrame(res, flags, args);
+    }
+
+    function sendCallResponseContFrame(isLast, args) {
+        var flags = 0;
+        if (!isLast) flags |= v2.CallResponse.Flags.Fragment;
+        self.sendCallResponseContFrame(res, flags, args);
     }
 
     function sendErrorFrame(codeString, message) {
@@ -284,20 +439,27 @@ TChannelV2Handler.prototype.buildIncomingRequest = function buildIncomingRequest
         tracing: reqFrame.tracing,
         service: reqFrame.service,
         headers: reqFrame.headers,
-        checksumType: reqFrame.body.csum.type,
-        arg1: reqFrame.body.arg1,
-        arg2: reqFrame.body.arg2,
-        arg3: reqFrame.body.arg3
+        checksum: reqFrame.body.csum
     });
+    req.handleFrame(reqFrame.body.args);
+    if (reqFrame.body.flags & v2.CallRequest.Flags.Fragment) {
+        req.state = reqres.States.Streaming;
+    } else {
+        req.handleFrame(null);
+    }
     return req;
 };
 
 TChannelV2Handler.prototype.buildIncomingResponse = function buildIncomingResponse(resFrame) {
     var res = TChannelIncomingResponse(resFrame.id, {
         code: resFrame.body.code,
-        arg1: resFrame.body.arg1,
-        arg2: resFrame.body.arg2,
-        arg3: resFrame.body.arg3
+        checksum: resFrame.body.csum
     });
+    res.handleFrame(resFrame.body.args);
+    if (resFrame.body.flags & v2.CallRequest.Flags.Fragment) {
+        res.state = reqres.States.Streaming;
+    } else {
+        res.handleFrame(null);
+    }
     return res;
 };

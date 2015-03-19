@@ -20,136 +20,75 @@
 
 'use strict';
 
-var parallel = require('run-parallel');
+var async = require('async');
 var Buffer = require('buffer').Buffer;
 var extend = require('xtend');
+var parallel = require('run-parallel');
+var Ready = require('ready-signal');
 var allocCluster = require('./lib/alloc-cluster.js');
 var EndpointHandler = require('../endpoint-handler');
 
 var Cases = [
 
     {
-        name: 'bufferOp',
-        op: Buffer('foo'),
-        reqHead: null,
-        reqBody: null,
-        resHead: '',
-        resBody: ''
-    },
-
-    {
-        name: 'stringOp',
+        name: 'stream body ["hello", " world"]',
         op: 'foo',
         reqHead: null,
-        reqBody: null,
+        reqBody: [
+            'hello',
+            ' world'
+        ],
         resHead: '',
-        resBody: ''
+        resBody: 'hello world'
     },
 
     {
-        name: 'bufferHead',
+        name: 'stream sec head + fox body',
         op: 'foo',
-        reqHead: Buffer('abc'),
-        reqBody: null,
-        resHead: 'abc',
-        resBody: ''
+        reqHead: spaceWords('sic transit gloria mundi'),
+        reqBody: spaceWords('the quick brown fox jumps over the lazy hound'),
+        resHead: 'sic transit gloria mundi',
+        resBody: 'the quick brown fox jumps over the lazy hound'
     },
 
     {
-        name: 'stringHead',
+        name: 'stream abc head + 123 body',
         op: 'foo',
-        reqHead: 'abc',
-        reqBody: null,
-        resHead: 'abc',
-        resBody: ''
-    },
-
-    {
-        name: 'objectHead',
-        op: 'foo',
-        reqHead: JSON.stringify({value: 'abc'}),
-        reqBody: null,
-        resHead: '{"value":"abc"}',
-        resBody: ''
-    },
-
-    {
-        name: 'nullHead',
-        op: 'foo',
-        reqHead: null,
-        reqBody: null,
-        resHead: '',
-        resBody: ''
-    },
-
-    {
-        name: 'undefinedHead',
-        op: 'foo',
-        reqHead: undefined,
-        reqBody: null,
-        resHead: '',
-        resBody: ''
-    },
-
-    {
-        name: 'bufferBody',
-        op: 'foo',
-        reqHead: null,
-        reqBody: Buffer('abc'),
-        resHead: '',
-        resBody: 'abc'
-    },
-
-    {
-        name: 'stringBody',
-        op: 'foo',
-        reqHead: null,
-        reqBody: 'abc',
-        resHead: '',
-        resBody: 'abc'
-    },
-
-    {
-        name: 'objectBody',
-        op: 'foo',
-        reqHead: null,
-        reqBody: JSON.stringify({value: 'abc'}),
-        resHead: '',
-        resBody: '{"value":"abc"}'
-    },
-
-    {
-        name: 'nullBody',
-        op: 'foo',
-        reqHead: null,
-        reqBody: null,
-        resHead: '',
-        resBody: ''
-    },
-
-    {
-        name: 'undefinedBody',
-        op: 'foo',
-        reqHead: null,
-        reqBody: undefined,
-        resHead: '',
-        resBody: ''
+        reqHead: 'abcdef'.split(''),
+        reqBody: '123456'.split(''),
+        resHead: 'abcdef',
+        resBody: '123456'
     },
 
 ];
 
-allocCluster.test('request().send() to a server', 2, function t(cluster, assert) {
+allocCluster.test('streaming echo w/ buffered callback', 2, function t(cluster, assert) {
     var one = cluster.channels[0];
     var two = cluster.channels[1];
     var hostOne = cluster.hosts[0];
 
     one.handler = EndpointHandler();
 
-    one.handler.register('foo', function foo(req, res, arg2, arg3) {
-        assert.ok(Buffer.isBuffer(arg2), 'handler got an arg2 buffer');
-        assert.ok(Buffer.isBuffer(arg3), 'handler got an arg3 buffer');
-        res.sendOk(arg2, arg3);
-    });
+    function foo(req, res) {
+        res.setOK(true);
+
+        req.arg2.on('data', function onArg2Data(chunk) {
+            res.arg2.write(chunk);
+        });
+        req.arg2.on('end', function onArg2End() {
+            res.arg2.end();
+        });
+
+        req.arg3.on('data', function onArg3Data(chunk) {
+            res.arg3.write(chunk);
+        });
+        req.arg3.on('end', function onArg3End() {
+            res.arg3.end();
+        });
+
+    }
+    foo.canStream = true;
+    one.handler.register('foo', foo);
 
     parallel(Cases.map(function eachTestCase(testCase) {
         testCase = extend({
@@ -186,12 +125,39 @@ allocCluster.test('request().send() to a server', 2, function t(cluster, assert)
 
 function sendTest(testCase, assert) {
     return function runSendTest(callback) {
-        testCase.channel
-            .request(testCase.opts)
-            .send(testCase.op, testCase.reqHead, testCase.reqBody, onResult);
-        function onResult(err, res, arg2, arg3) {
-            var head = arg2;
-            var body = arg3;
+        var req = testCase.channel.request(testCase.opts);
+        var resultReady = Ready();
+        req.hookupCallback(resultReady.signal);
+        req.arg1.end(testCase.op);
+
+        async.series({
+            sinkHead: sinkParts.bind(null, testCase.reqHead, req.arg2),
+            sinkBody: sinkParts.bind(null, testCase.reqBody, req.arg3),
+            result: resultReady
+        }, onResult);
+
+        function sinkParts(parts, stream, callback) {
+            if (!parts) {
+                stream.end();
+                callback();
+            } else {
+                var i = 0;
+                async.eachSeries(parts, function eachPart(part, next) {
+                    console.log('write part %j', part);
+                    if (++i < parts.length) {
+                        stream.write(part);
+                    } else {
+                        stream.end(part);
+                    }
+                    setImmediate(next);
+                }, callback);
+            }
+        }
+
+        function onResult(err, result) {
+            // var res = result.result[0];
+            var head = result.result[1];
+            var body = result.result[2];
             assert.ifError(err, testCase.name + ': no result error');
             if (!err) {
                 assert.ok(Buffer.isBuffer(head), testCase.name + ': got head buffer');
@@ -202,4 +168,10 @@ function sendTest(testCase, assert) {
             callback();
         }
     };
+}
+
+function spaceWords(str) {
+    return str
+        .split(/( +[^ ]+)/)
+        .filter(function(part) {return part.length;});
 }
