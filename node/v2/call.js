@@ -104,9 +104,7 @@ function CallResponse(flags, code, tracing, headers, csum, arg1, arg2, arg3) {
 
 CallResponse.TypeCode = 0x04;
 
-CallResponse.Flags = {
-    Fragment: 0x01
-};
+CallResponse.Flags = CallRequest.Flags;
 
 CallResponse.Codes = {
     OK: 0x00,
